@@ -48,7 +48,7 @@ class ArucoMapLocalization(Node):
         self.base_frame = "blueboat/base_link"
         self.camera_frame = "blueboat_camera_link"
 
-        # Topics (mantengo tus nombres)
+        # Topics 
         self.aruco_topic = "/blueboat/down_camera/aruco_detections"
         self.marker_topic = "/blueboat/aruco_map_markers"
         self.pose_topic = "/blueboat/navigator/aruco_pose"
@@ -225,7 +225,7 @@ class ArucoMapLocalization(Node):
         out.pose.pose.orientation.z = float(qz)
         out.pose.pose.orientation.w = float(qw)
 
-        # Covariance (mantengo tu idea; si quieres “bien” sería var = sigma^2)
+        # Covariance 
         total_weight = float(np.sum(w_np))
         sigma_xy = 0.01 / np.sqrt(max(total_weight, 1e-6))
         sigma_z = 0.005 / np.sqrt(max(total_weight, 1e-6))
