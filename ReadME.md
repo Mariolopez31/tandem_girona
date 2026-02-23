@@ -88,7 +88,7 @@ ROS 2 node that:
 
 - `ARUCO_MAP`: fixed marker positions (in `cirtesu_base_link`)
 - `ARUCO_YAW_OFFSET`: yaw offset to match camera/detector conventions
-- `camera_frame`: `blueboat_camera_link`
+- `camera_frame`: `blueboat/camera_link`
 - `base_frame`: `blueboat/base_link`
 
 ## Quick usage
