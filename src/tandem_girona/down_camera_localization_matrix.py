@@ -12,8 +12,12 @@ from aruco_opencv_msgs.msg import ArucoDetection
 from visualization_msgs.msg import Marker, MarkerArray
 from geometry_msgs.msg import Pose, PoseWithCovarianceStamped
 
-from tf_transformations import quaternion_from_euler, euler_from_quaternion, quaternion_matrix, quaternion_multiply
-
+from tf_transformations import (
+    quaternion_from_euler,
+    euler_from_quaternion,
+    quaternion_matrix,
+    quaternion_multiply
+)
 
 # ============================
 # Fixed ArUco map (cirtesu_base_link)
@@ -38,15 +42,19 @@ ARUCO_MAP = {
     8: ( 1.65, -3.0, 5.0),
 }
 
+FRAME_VIS = "cirtesu_base_link"
+
+
+def wrap(a: float) -> float:
+    return float(np.arctan2(np.sin(a), np.cos(a)))
+
 
 def transform_pose(p: Pose, t) -> Pose:
     """
     Apply TransformStamped t (target <- source) to Pose p expressed in source frame.
     Returns Pose expressed in target frame.
     """
-    # translation
     tr = t.transform.translation
-    # rotation
     qr = t.transform.rotation
 
     T = quaternion_matrix([qr.x, qr.y, qr.z, qr.w])
@@ -79,6 +87,15 @@ class ArucoMapLocalization(Node):
 
         self.base_frame = "blueboat/base_link"
 
+        # EMA smoothing (NUEVO)
+        self.ema_xy = None
+        self.ema_yaw = None
+        self.alpha = 0.25  # 0.15–0.35 típico
+        self.alpha_nominal = 0.25
+        self.alpha_fast = 0.85      # converge en 1–2 frames
+        self.fast_frames = 20       # ~0.6s si vas a 30Hz (ajusta)
+        self._n_updates = 0
+
         # Topics
         self.aruco_topic = "/blueboat/down_camera/aruco_detections"
         self.marker_topic = "/blueboat/aruco_map_markers"
@@ -103,17 +120,17 @@ class ArucoMapLocalization(Node):
         self.get_logger().info("Down camera ArUco localization started")
 
     def aruco_callback(self, msg: ArucoDetection):
+        
+        
         visible_ids = [m.marker_id for m in msg.markers]
-        self.get_logger().info(
-            f"det frame={msg.header.frame_id} n={len(msg.markers)} ids={visible_ids}"
-        )
+        stamp = msg.header.stamp  # timestamp del detector
 
         # 1) Publish fixed map markers
         marker_array = MarkerArray()
 
         mesh_marker = Marker()
-        mesh_marker.header.frame_id = "cirtesu_base_link"
-        mesh_marker.header.stamp = self.get_clock().now().to_msg()
+        mesh_marker.header.frame_id = FRAME_VIS
+        mesh_marker.header.stamp = stamp
         mesh_marker.ns = "cirtesu_mesh"
         mesh_marker.id = 1000
         mesh_marker.type = Marker.MESH_RESOURCE
@@ -126,7 +143,7 @@ class ArucoMapLocalization(Node):
         mesh_marker.pose.position.x = float(CIRTESU_MESH_POS[0])
         mesh_marker.pose.position.y = float(CIRTESU_MESH_POS[1])
         mesh_marker.pose.position.z = float(CIRTESU_MESH_POS[2])
-        qx, qy, qz, qw = quaternion_from_euler(np.pi, 0.0, CIRTESU_MESH_YAW) 
+        qx, qy, qz, qw = quaternion_from_euler(np.pi, 0.0, CIRTESU_MESH_YAW)
         mesh_marker.pose.orientation.x = float(qx)
         mesh_marker.pose.orientation.y = float(qy)
         mesh_marker.pose.orientation.z = float(qz)
@@ -136,8 +153,8 @@ class ArucoMapLocalization(Node):
 
         for mid, (mx, my, mz) in ARUCO_MAP.items():
             m = Marker()
-            m.header.frame_id = "cirtesu_base_link"
-            m.header.stamp = self.get_clock().now().to_msg()
+            m.header.frame_id = FRAME_VIS
+            m.header.stamp = stamp
             m.ns = "aruco_map"
             m.id = int(mid)
             m.type = Marker.CUBE
@@ -161,13 +178,13 @@ class ArucoMapLocalization(Node):
             return
 
         cam_frame = msg.header.frame_id
-        self.get_logger().info(f"lookup TF {self.base_frame} <- {cam_frame}")
 
+        # TF base <- cam con stamp real (NO latest)
         try:
             tf_base_cam = self.tf_buffer.lookup_transform(
                 self.base_frame,
                 cam_frame,
-                rclpy.time.Time(),
+                stamp,
                 timeout=Duration(seconds=0.2),
             )
         except Exception as e:
@@ -182,32 +199,43 @@ class ArucoMapLocalization(Node):
             if mid not in ARUCO_MAP:
                 continue
 
+            # marker pose en base_link
             try:
-                base_pose = transform_pose(mk.pose, tf_base_cam)  # Pose in base_link
+                base_pose = transform_pose(mk.pose, tf_base_cam)
             except Exception as e:
                 self.get_logger().warn(f"transform_pose failed (id={mid}): {e}")
                 continue
 
             wx, wy, wz = ARUCO_MAP[mid]
 
-            rx = wx - base_pose.position.x
-            ry = wy - base_pose.position.y
-            rz = wz - base_pose.position.z
-
-            dx = base_pose.position.x
-            dy = base_pose.position.y
-            dz = base_pose.position.z
-            dist = float(np.sqrt(dx*dx + dy*dy + dz*dz))
-            w = 1.0 / (dist*dist + 0.25)
-
-            estimates.append([rx, ry, rz])
-            weights.append(w)
-
+            # yaw del marker en base
             q = base_pose.orientation
             _, _, yaw_marker = euler_from_quaternion([q.x, q.y, q.z, q.w])
 
-            yaw_robot = yaw_marker + ARUCO_YAW_OFFSET
-            yaw_robot = float(np.arctan2(np.sin(yaw_robot), np.cos(yaw_robot)))
+            # convención original
+            yaw_robot = wrap(yaw_marker + ARUCO_YAW_OFFSET)
+
+            # posición con rotación 2D
+            mx_b = float(base_pose.position.x)
+            my_b = float(base_pose.position.y)
+            mz_b = float(base_pose.position.z)
+
+            R = np.array([[np.cos(yaw_robot), -np.sin(yaw_robot)],
+                          [np.sin(yaw_robot),  np.cos(yaw_robot)]], dtype=float)
+
+            p_b_m = np.array([mx_b, my_b], dtype=float)   # marker en base
+            p_w_m = np.array([wx, wy], dtype=float)       # marker en mundo
+            p_w_b = p_w_m - (R @ p_b_m)                   # base en mundo
+
+            rx = float(p_w_b[0])
+            ry = float(p_w_b[1])
+            rz = float(wz - mz_b)
+
+            dist = float(np.hypot(mx_b, my_b))
+            w = 1.0 / (dist * dist + 0.25)
+
+            estimates.append([rx, ry, rz])
+            weights.append(w)
 
             yaw_estimates.append(yaw_robot)
             yaw_weights.append(w)
@@ -222,14 +250,34 @@ class ArucoMapLocalization(Node):
 
         yaw_np = np.array(yaw_estimates, dtype=float)
         wy_np = np.array(yaw_weights, dtype=float)
-        mean_yaw = float(np.arctan2(np.sum(np.sin(yaw_np)*wy_np), np.sum(np.cos(yaw_np)*wy_np)))
+        mean_yaw = float(np.arctan2(np.sum(np.sin(yaw_np) * wy_np), np.sum(np.cos(yaw_np) * wy_np)))
+
+        # --- EMA smoothing with warm-start ---
+        alpha = self.alpha_fast if self._n_updates < self.fast_frames else self.alpha_nominal
+
+        if self.ema_xy is None:
+            self.ema_xy = np.array([mean_pos[0], mean_pos[1]], dtype=float)
+            self.ema_yaw = float(mean_yaw)
+        else:
+            self.ema_xy = (1.0 - alpha) * self.ema_xy + alpha * np.array([mean_pos[0], mean_pos[1]], dtype=float)
+
+            s = (1.0 - alpha) * np.sin(self.ema_yaw) + alpha * np.sin(mean_yaw)
+            c = (1.0 - alpha) * np.cos(self.ema_yaw) + alpha * np.cos(mean_yaw)
+            self.ema_yaw = float(np.arctan2(s, c))
+
+        self._n_updates += 1
+
+        mean_pos[0] = float(self.ema_xy[0])
+        mean_pos[1] = float(self.ema_xy[1])
+        mean_yaw = float(self.ema_yaw)
 
         out = PoseWithCovarianceStamped()
-        out.header.stamp = self.get_clock().now().to_msg()
-        out.header.frame_id = "cirtesu_base_link"
+        out.header.stamp = stamp
+        out.header.frame_id = FRAME_VIS
+
         out.pose.pose.position.x = float(mean_pos[0])
         out.pose.pose.position.y = float(mean_pos[1])
-        out.pose.pose.position.z = float(mean_pos[2])
+        out.pose.pose.position.z = 0.0  # 2D
 
         qx, qy, qz, qw = quaternion_from_euler(0.0, 0.0, -mean_yaw)
         out.pose.pose.orientation.x = float(qx)
@@ -237,23 +285,17 @@ class ArucoMapLocalization(Node):
         out.pose.pose.orientation.z = float(qz)
         out.pose.pose.orientation.w = float(qw)
 
-        total_w = float(np.sum(w_np))
-        sigma_xy  = 0.20               # 20 cm
-        sigma_z   = 10.0               # si estás en 2D, “no me fío” del z
-        sigma_yaw = np.deg2rad(10.0)   # 10 grados
+        sigma_xy  = 0.50
+        sigma_z   = 10.0
+        sigma_yaw = np.deg2rad(20.0)
 
         cov = [0.0] * 36
         cov[0]  = sigma_xy**2
         cov[7]  = sigma_xy**2
         cov[14] = sigma_z**2
         cov[35] = sigma_yaw**2
-
         out.pose.covariance = cov
 
-
-        self.get_logger().info(
-            f"PUBLISH aruco_pose x={mean_pos[0]:.2f} y={mean_pos[1]:.2f} z={mean_pos[2]:.2f} yaw={mean_yaw:.2f}"
-        )
         self.pose_pub.publish(out)
 
 

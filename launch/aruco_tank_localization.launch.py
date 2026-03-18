@@ -28,8 +28,8 @@ def generate_launch_description():
         # Downward camera localization
         Node(
             package='tandem_girona',
-            executable='down_camera_localization',
-            name='down_camera_localization',
+            executable='down_camera_localization_matrix',
+            name='down_camera_localization_matrix',
             output='screen',
             parameters=[sim],
         ),
