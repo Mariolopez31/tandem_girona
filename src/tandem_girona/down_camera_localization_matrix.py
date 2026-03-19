@@ -23,7 +23,7 @@ from tf_transformations import (
 # Fixed ArUco map (cirtesu_base_link)
 # ============================
 
-CIRTESU_MESH_PATH = "package://blueboat_stonefish/meshes/cirtesu.dae"
+CIRTESU_MESH_PATH = "package://blueboat_stonefish_core/meshes/cirtesu.dae"
 CIRTESU_MESH_SCALE = [1.0, 1.0, 1.0]
 CIRTESU_MESH_POS = [0.0, 0.0, 0.2]
 CIRTESU_MESH_YAW = 0.0
