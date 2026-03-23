@@ -26,6 +26,7 @@ setup(
         "console_scripts": [
             "down_camera_localization = tandem_girona.down_camera_localization:main",
             "down_camera_localization_matrix = tandem_girona.down_camera_localization_matrix:main",
+            'aruco_to_relocalize = tandem_girona.aruco_to_relocalize:main',
         ],
     },
 )
