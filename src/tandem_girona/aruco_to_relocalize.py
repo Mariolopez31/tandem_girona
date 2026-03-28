@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import math
+from collections import deque
 from typing import Optional
 
 import rclpy
@@ -14,6 +15,13 @@ from interface.srv import Relocalize, IsValid
 
 def wrap_angle(a: float) -> float:
     return math.atan2(math.sin(a), math.cos(a))
+
+
+RED = "\033[31m"
+GREEN = "\033[32m"
+BLUE = "\033[34m"
+YELLOW = "\033[33m"
+RESET = "\033[0m"
 
 
 class ArucoToRelocalize(Node):
@@ -45,8 +53,15 @@ class ArucoToRelocalize(Node):
         self.declare_parameter("max_pose_age_sec", 2.0)
         self.declare_parameter("require_pose_before_trigger", True)
 
+        # Robust trigger window
+        self.declare_parameter("trigger_window_sec", 10.0)
+        self.declare_parameter("min_trigger_samples", 10)
+        self.declare_parameter("trigger_max_xy_deviation", 0.40)
+        self.declare_parameter("trigger_max_yaw_deviation_deg", 12.0)
+        self.declare_parameter("trigger_pose_buffer_size", 50)
+
         # Logging
-        self.declare_parameter("log_every_n_pose_msgs", 5)
+        self.declare_parameter("log_every_n_pose_msgs", 0)
 
         self.aruco_pose_topic = self.get_parameter("aruco_pose_topic").get_parameter_value().string_value
         self.trigger_topic = self.get_parameter("trigger_topic").get_parameter_value().string_value
@@ -69,8 +84,14 @@ class ArucoToRelocalize(Node):
         self.max_pose_age_sec = self.get_parameter("max_pose_age_sec").get_parameter_value().double_value
         self.require_pose_before_trigger = self.get_parameter("require_pose_before_trigger").get_parameter_value().bool_value
 
+        self.trigger_window_sec = self.get_parameter("trigger_window_sec").get_parameter_value().double_value
+        self.min_trigger_samples = max(1, self.get_parameter("min_trigger_samples").get_parameter_value().integer_value)
+        self.trigger_max_xy_deviation = self.get_parameter("trigger_max_xy_deviation").get_parameter_value().double_value
+        self.trigger_max_yaw_deviation_deg = self.get_parameter("trigger_max_yaw_deviation_deg").get_parameter_value().double_value
+        self.trigger_pose_buffer_size = max(1, self.get_parameter("trigger_pose_buffer_size").get_parameter_value().integer_value)
+
         self.log_every_n_pose_msgs = max(
-            1,
+            0,
             self.get_parameter("log_every_n_pose_msgs").get_parameter_value().integer_value
         )
 
@@ -78,6 +99,7 @@ class ArucoToRelocalize(Node):
         self.last_x: Optional[float] = None
         self.last_y: Optional[float] = None
         self.last_yaw: Optional[float] = None
+        self.pose_history = deque(maxlen=self.trigger_pose_buffer_size)
         self.has_called_once = False
         self.pending_check = False
         self.pose_msg_counter = 0
@@ -108,6 +130,11 @@ class ArucoToRelocalize(Node):
         self.get_logger().info(f"  relocalize_check_service: {self.relocalize_check_service_name}")
         self.get_logger().info(f"  pcd_path: {self.pcd_path}")
         self.get_logger().info(f"  auto_trigger_on_first_pose: {self.auto_trigger_on_first_pose}")
+        self.get_logger().info(f"  trigger_window_sec: {self.trigger_window_sec}")
+        self.get_logger().info(f"  min_trigger_samples: {self.min_trigger_samples}")
+        self.get_logger().info(f"  trigger_max_xy_deviation: {self.trigger_max_xy_deviation}")
+        self.get_logger().info(f"  trigger_max_yaw_deviation_deg: {self.trigger_max_yaw_deviation_deg}")
+        self.get_logger().info(f"  trigger_pose_buffer_size: {self.trigger_pose_buffer_size}")
         self.get_logger().info(f"  log_every_n_pose_msgs: {self.log_every_n_pose_msgs}")
 
     def pose_cb(self, msg: PoseWithCovarianceStamped):
@@ -124,9 +151,15 @@ class ArucoToRelocalize(Node):
         self.last_x = x
         self.last_y = y
         self.last_yaw = yaw
+        self.pose_history.append({
+            "time": rclpy.time.Time.from_msg(msg.header.stamp),
+            "x": x,
+            "y": y,
+            "yaw": yaw,
+        })
 
         self.pose_msg_counter += 1
-        if self.pose_msg_counter % self.log_every_n_pose_msgs == 0:
+        if self.log_every_n_pose_msgs > 0 and self.pose_msg_counter % self.log_every_n_pose_msgs == 0:
             self.get_logger().info(
                 f"Latest FILTERED ArUco pose: "
                 f"x={x:.3f} y={y:.3f} yaw={yaw:.3f} rad ({math.degrees(yaw):.1f} deg)"
@@ -157,6 +190,87 @@ class ArucoToRelocalize(Node):
 
         return True
 
+    def compute_trigger_pose(self) -> Optional[tuple[float, float, float]]:
+        now = self.get_clock().now()
+        recent = []
+        for item in self.pose_history:
+            age = (now - item["time"]).nanoseconds / 1e9
+            if age <= self.trigger_window_sec:
+                recent.append(item)
+
+        if len(recent) < self.min_trigger_samples:
+            self.get_logger().warn(
+                f"Not enough recent ArUco poses for robust trigger: "
+                f"{len(recent)} < {self.min_trigger_samples} in {self.trigger_window_sec:.2f}s"
+            )
+            return None
+
+        xs = [p["x"] for p in recent]
+        ys = [p["y"] for p in recent]
+        yaws = [p["yaw"] for p in recent]
+
+        med_x = sorted(xs)[len(xs) // 2]
+        med_y = sorted(ys)[len(ys) // 2]
+        ref_yaw = math.atan2(sum(math.sin(a) for a in yaws), sum(math.cos(a) for a in yaws))
+
+        max_yaw_dev = math.radians(self.trigger_max_yaw_deviation_deg)
+        inliers = []
+        outliers = []
+        for item in recent:
+            dx = item["x"] - med_x
+            dy = item["y"] - med_y
+            xy_dev = math.hypot(dx, dy)
+            yaw_dev = abs(wrap_angle(item["yaw"] - ref_yaw))
+            sample = {
+                **item,
+                "xy_dev": xy_dev,
+                "yaw_dev": yaw_dev,
+            }
+            if xy_dev <= self.trigger_max_xy_deviation and yaw_dev <= max_yaw_dev:
+                inliers.append(sample)
+            else:
+                outliers.append(sample)
+
+        self.get_logger().info(
+            f"{YELLOW}Relocalization trigger analysis: {len(recent)} recent samples in {self.trigger_window_sec:.2f}s{RESET}"
+        )
+        for idx, item in enumerate(inliers, start=1):
+            self.get_logger().info(
+                f"{GREEN}[ACCEPT {idx:02d}]{RESET} "
+                f"x={item['x']:.3f} y={item['y']:.3f} yaw={item['yaw']:.3f} "
+                f"dxy={item['xy_dev']:.3f} dyaw={math.degrees(item['yaw_dev']):.2f}deg"
+            )
+        for idx, item in enumerate(outliers, start=1):
+            self.get_logger().warn(
+                f"{RED}[REJECT {idx:02d}]{RESET} "
+                f"x={item['x']:.3f} y={item['y']:.3f} yaw={item['yaw']:.3f} "
+                f"dxy={item['xy_dev']:.3f} dyaw={math.degrees(item['yaw_dev']):.2f}deg"
+            )
+
+        if len(inliers) < self.min_trigger_samples:
+            self.get_logger().warn(
+                f"Too many trigger-pose outliers: kept {len(inliers)} / {len(recent)} samples"
+            )
+            return None
+
+        inlier_xs = sorted(item["x"] for item in inliers)
+        inlier_ys = sorted(item["y"] for item in inliers)
+        inlier_yaws = [item["yaw"] for item in inliers]
+
+        out_x = inlier_xs[len(inlier_xs) // 2]
+        out_y = inlier_ys[len(inlier_ys) // 2]
+        out_yaw = math.atan2(
+            sum(math.sin(a) for a in inlier_yaws),
+            sum(math.cos(a) for a in inlier_yaws),
+        )
+
+        self.get_logger().info(
+            f"{BLUE}[ROBUST MEAN]{RESET} "
+            f"x={out_x:.3f} y={out_y:.3f} yaw={out_yaw:.3f} "
+            f"from {len(inliers)}/{len(recent)} samples"
+        )
+        return float(out_x), float(out_y), float(out_yaw)
+
     def call_relocalize(self):
         if not self.pcd_path:
             self.get_logger().error("pcd_path parameter is empty")
@@ -170,16 +284,21 @@ class ArucoToRelocalize(Node):
             if not self.pose_is_recent_enough():
                 return
 
+        robust_pose = self.compute_trigger_pose()
+        if robust_pose is None:
+            return
+        robust_x, robust_y, robust_yaw = robust_pose
+
         if not self.relocalize_client.wait_for_service(timeout_sec=1.0):
             self.get_logger().warn(f"Service {self.relocalize_service_name} not available")
             return
 
         req = Relocalize.Request()
         req.pcd_path = self.pcd_path
-        req.x = float(self.last_x)
-        req.y = float(self.last_y)
+        req.x = float(robust_x)
+        req.y = float(robust_y)
         req.z = float(self.fixed_z)
-        req.yaw = float(self.last_yaw)
+        req.yaw = float(robust_yaw)
         req.roll = float(self.fixed_roll)
         req.pitch = float(self.fixed_pitch)
 

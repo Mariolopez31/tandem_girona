@@ -119,6 +119,8 @@ class DownCameraLocalization(Node):
 
         self.marker_pub = self.create_publisher(MarkerArray, self.marker_topic, 1)
         self.pose_pub = self.create_publisher(PoseWithCovarianceStamped, self.pose_topic, 1)
+        self.pose_viz_topic = "/blueboat/navigator/aruco_pose_viz"
+        self.pose_viz_pub = self.create_publisher(PoseWithCovarianceStamped, self.pose_viz_topic, 1)
 
         self.create_subscription(
             ArucoDetection,
@@ -143,7 +145,7 @@ class DownCameraLocalization(Node):
 
         self.publish_timer = self.create_timer(self.publish_period, self.publish_filtered_pose)
 
-        self._log_counter = 0
+        self._log_counter = 0   
 
         self.get_logger().info("Down camera ArUco localization started")
         self.get_logger().info(
@@ -338,8 +340,7 @@ class DownCameraLocalization(Node):
 
         mean_pos, mean_yaw, kept_weights = self.robust_fuse_estimates(positions, yaws, weights)
 
-        # Corrección 180° que ya viste que hacía falta en RViz
-        corrected_yaw = wrap_angle(mean_yaw + np.pi)
+        corrected_yaw = wrap_angle(mean_yaw)
 
         # Guardamos estimación instantánea en buffer, no publicamos aquí
         now_ros = self.get_clock().now()
@@ -355,12 +356,6 @@ class DownCameraLocalization(Node):
         })
 
         self._log_counter += 1
-        if self._log_counter % 10 == 0:
-            self.get_logger().info(
-                f"raw aruco estimate -> x={mean_pos[0]:.3f} y={mean_pos[1]:.3f} "
-                f"yaw_raw={mean_yaw:.3f} yaw_corr={corrected_yaw:.3f} "
-                f"markers={len(positions)} buffer={len(self.pose_buffer)}"
-            )
 
     def publish_filtered_pose(self):
         now = self.get_clock().now()
@@ -425,10 +420,22 @@ class DownCameraLocalization(Node):
 
         self.pose_pub.publish(out)
 
-        self.get_logger().info(
-            f"FILTERED aruco_pose ({publish_mode}) -> "
-            f"x={pub_x:.3f} y={pub_y:.3f} yaw={pub_yaw:.3f} recent={len(recent)}"
-        )
+        out_viz = PoseWithCovarianceStamped()
+        out_viz.header = out.header
+        out_viz.pose.pose.position.x = out.pose.pose.position.x
+        out_viz.pose.pose.position.y = out.pose.pose.position.y
+        out_viz.pose.pose.position.z = out.pose.pose.position.z
+
+        viz_yaw = wrap_angle(pub_yaw + np.pi)
+        qx, qy, qz, qw = quaternion_from_euler(0.0, 0.0, float(viz_yaw))
+        out_viz.pose.pose.orientation.x = float(qx)
+        out_viz.pose.pose.orientation.y = float(qy)
+        out_viz.pose.pose.orientation.z = float(qz)
+        out_viz.pose.pose.orientation.w = float(qw)
+        out_viz.pose.covariance = list(out.pose.covariance)
+
+        self.pose_viz_pub.publish(out_viz)
+
 
 
 def main():

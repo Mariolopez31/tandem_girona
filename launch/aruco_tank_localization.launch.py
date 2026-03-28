@@ -32,7 +32,7 @@ def generate_launch_description():
                 'relocalize_service': '/localizer/relocalize',
                 'relocalize_check_service': '/localizer/relocalize_check',
 
-                'pcd_path': '/home/mariolopez31/cirtesu_ws/src/fast_lio/PCD/sim_cirtesu.pcd',
+                'pcd_path': '/home/mario-cirtesu/cirtesu_ws/src/blueboat_stonefish/src/FASTLIO_cirtesu/fast_lio/PCD/sim_cirtesu.pcd',
 
                 'auto_trigger_on_first_pose': False,
                 'check_success_after_call': True,
