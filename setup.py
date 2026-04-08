@@ -1,32 +1,59 @@
 from setuptools import setup
 import os
+import platform
+import warnings
 from glob import glob
 
 package_name = "tandem_girona"
 
-setup(
-    name=package_name,
-    version="0.0.0",
-    packages=[package_name],
-    package_dir={"": "src"},
-    data_files=[
-        ("share/ament_index/resource_index/packages", ["resource/" + package_name]),
-        ("share/" + package_name, ["package.xml"]),
-        (os.path.join("share", package_name, "launch"), glob("launch/*.launch.py")),
-        (os.path.join("share", package_name, "config"), glob("config/*.yaml")),
-        (os.path.join("share", package_name, "meshes"), glob("meshes/*")),
-    ],
-    install_requires=["setuptools"],
-    zip_safe=True,
-    maintainer="cirtesu",
-    maintainer_email="cirtesu@todo.todo",
-    description="Down camera ArUco localization + EKF config",
-    license="TODO",
-    entry_points={
-        "console_scripts": [
-            "down_camera_localization = tandem_girona.down_camera_localization:main",
-            "down_camera_localization_matrix = tandem_girona.down_camera_localization_matrix:main",
-            'aruco_to_relocalize = tandem_girona.aruco_to_relocalize:main',
+is_raspberry = platform.machine() in ("armv7l", "aarch64")
+
+if is_raspberry:
+    warnings.warn(
+        f"Package '{package_name}' will NOT be installed because a Raspberry/ARM "
+        f"architecture was detected (platform.machine()='{platform.machine()}')."
+    )
+
+    setup(
+        name=package_name,
+        version="0.0.0",
+        packages=[],
+        data_files=[
+            ("share/ament_index/resource_index/packages", ["resource/" + package_name]),
+            ("share/" + package_name, ["package.xml"]),
         ],
-    },
-)
+        install_requires=["setuptools"],
+        zip_safe=True,
+        maintainer="cirtesu",
+        maintainer_email="cirtesu@todo.todo",
+        description="Skipped on Raspberry/ARM",
+        license="TODO",
+        entry_points={},
+    )
+else:
+    setup(
+        name=package_name,
+        version="0.0.0",
+        packages=[package_name],
+        package_dir={"": "src"},
+        data_files=[
+            ("share/ament_index/resource_index/packages", ["resource/" + package_name]),
+            ("share/" + package_name, ["package.xml"]),
+            (os.path.join("share", package_name, "launch"), glob("launch/*.launch.py")),
+            (os.path.join("share", package_name, "config"), glob("config/*.yaml")),
+            (os.path.join("share", package_name, "meshes"), glob("meshes/*")),
+        ],
+        install_requires=["setuptools"],
+        zip_safe=True,
+        maintainer="cirtesu",
+        maintainer_email="cirtesu@todo.todo",
+        description="Down camera ArUco localization + EKF config",
+        license="TODO",
+        entry_points={
+            "console_scripts": [
+                "down_camera_localization = tandem_girona.down_camera_localization:main",
+                "down_camera_localization_matrix = tandem_girona.down_camera_localization_matrix:main",
+                'aruco_to_relocalize = tandem_girona.aruco_to_relocalize:main',
+            ],
+        },
+    )
